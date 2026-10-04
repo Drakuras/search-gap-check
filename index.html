@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>html{color-scheme:light}:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>Search Gap Saturation Check</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<style>
+/* Layout: a vertical flow (find → check → score → decide), then a live scorer you use on each term */
+:root{
+  --bg:#f5f6f8; --surface:#ffffff; --ink:#151a24; --muted:#5b6475; --line:#d9dde5;
+  --accent:#3b4cca; --accent-soft:#e8eafb;
+  --go:#14804a; --go-soft:#e3f4ea;
+  --test:#2f6fd6; --test-soft:#e5eefc;
+  --warn:#b26a00; --warn-soft:#fbf0dc;
+  --skip:#c0362c; --skip-soft:#fbe6e4;
+  --f-display:"Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body:"IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono:"IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f131b; --surface:#181d28; --ink:#e8ebf2; --muted:#9aa3b5; --line:#2a3141;
+  --accent:#8f9bff; --accent-soft:#232a4a;
+  --go:#4cc884; --go-soft:#163225; --test:#78a8ff; --test-soft:#18284a;
+  --warn:#f0b04a; --warn-soft:#3a2c12; --skip:#ff7d71; --skip-soft:#3d1c1a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f131b; --surface:#181d28; --ink:#e8ebf2; --muted:#9aa3b5; --line:#2a3141;
+  --accent:#8f9bff; --accent-soft:#232a4a;
+  --go:#4cc884; --go-soft:#163225; --test:#78a8ff; --test-soft:#18284a;
+  --warn:#f0b04a; --warn-soft:#3a2c12; --skip:#ff7d71; --skip-soft:#3d1c1a; color-scheme:dark}
+
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.55}
+.wrap{max-width:940px;margin:0 auto;padding-inline:20px;padding-block:36px 56px;display:flex;flex-direction:column;gap:40px}
+h1,h2,h3{font-family:var(--f-display);text-wrap:balance;margin:0;letter-spacing:-.01em}
+h1{font-size:clamp(28px,5vw,42px);font-weight:800;line-height:1.05}
+h2{font-size:22px;font-weight:800}
+h3{font-size:16px;font-weight:600}
+p{margin:0}
+.lede{color:var(--muted);max-width:62ch;margin-top:10px}
+.eyebrow{font-family:var(--f-mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
+section{display:flex;flex-direction:column;gap:16px}
+
+/* Flow */
+.flow{display:flex;flex-direction:column;align-items:stretch}
+.step{display:grid;grid-template-columns:44px 1fr;gap:14px;align-items:start;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+.step .n{font-family:var(--f-mono);font-weight:600;width:44px;height:44px;border-radius:50%;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent);font-size:15px}
+.step .body{min-width:0;display:flex;flex-direction:column;gap:4px}
+.step .where{font-family:var(--f-mono);font-size:12px;color:var(--muted)}
+.step p{color:var(--muted)}
+.arrow{height:26px;display:flex;justify-content:center}
+.arrow svg{width:14px;height:26px}
+.arrow path{stroke:var(--line);fill:none;stroke-width:2}
+.arrow polygon{fill:var(--line)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.chip{font-size:12.5px;padding:3px 9px;border-radius:999px;background:var(--bg);border:1px solid var(--line);color:var(--ink)}
+
+/* Signals table */
+.tablebox{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;min-width:600px}
+th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{font-family:var(--f-mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:500}
+td:first-child{font-weight:600;white-space:nowrap}
+th.good{color:var(--go)} th.bad{color:var(--skip)}
+td.pts{font-family:var(--f-mono);font-size:13px;color:var(--muted);white-space:nowrap}
+
+/* Decision bands */
+.bands{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+@media (max-width:720px){.bands{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:420px){.bands{grid-template-columns:1fr}}
+.band{border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:6px;border:1px solid transparent}
+.band .range{font-family:var(--f-mono);font-weight:600;font-size:22px;font-variant-numeric:tabular-nums}
+.band .label{font-weight:600}
+.band p{font-size:13.5px}
+.b-go{background:var(--go-soft);color:var(--go)} .b-go p{color:var(--ink)}
+.b-test{background:var(--test-soft);color:var(--test)} .b-test p{color:var(--ink)}
+.b-warn{background:var(--warn-soft);color:var(--warn)} .b-warn p{color:var(--ink)}
+.b-skip{background:var(--skip-soft);color:var(--skip)} .b-skip p{color:var(--ink)}
+.band.on{border-color:currentColor;box-shadow:0 0 0 2px currentColor inset}
+
+/* Scorer */
+.scorer{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px;display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:24px}
+@media (max-width:720px){.scorer{grid-template-columns:1fr}}
+.q{display:flex;flex-direction:column;gap:8px;padding-block:10px;border-bottom:1px solid var(--line)}
+.q:last-child{border-bottom:0}
+.q legend{font-weight:600;padding:0;margin-bottom:6px}
+fieldset{border:0;margin:0;padding:0}
+.opts{display:flex;flex-wrap:wrap;gap:6px}
+.opts input{position:absolute;opacity:0;pointer-events:none}
+.opts label{cursor:pointer;font-size:13.5px;padding:6px 11px;border-radius:8px;border:1px solid var(--line);background:var(--bg);display:inline-flex;gap:8px;align-items:center}
+.opts label .p{font-family:var(--f-mono);font-size:12px;color:var(--muted)}
+.opts input:checked + label{border-color:var(--accent);background:var(--accent-soft);color:var(--ink)}
+.opts input:checked + label .p{color:var(--accent)}
+.opts input:focus-visible + label{outline:2px solid var(--accent);outline-offset:2px}
+.result{display:flex;flex-direction:column;gap:12px;align-self:start;position:sticky;top:calc(env(safe-area-inset-top,0px) + 16px)}
+.score{font-family:var(--f-mono);font-weight:600;font-size:64px;line-height:1;font-variant-numeric:tabular-nums}
+.score small{font-size:20px;color:var(--muted)}
+.meter{height:10px;border-radius:99px;background:linear-gradient(90deg,var(--go) 0 30%,var(--test) 30% 50%,var(--warn) 50% 70%,var(--skip) 70% 100%);position:relative}
+.meter i{position:absolute;top:-5px;width:4px;height:20px;border-radius:2px;background:var(--ink);transform:translateX(-50%);transition:left .25s ease}
+.verdict{font-family:var(--f-display);font-weight:800;font-size:22px}
+.verdict-note{color:var(--muted);font-size:14px}
+.reset{align-self:flex-start;font:inherit;font-size:13px;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}
+.reset:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* Demand checker */
+.demand-inputs{display:flex;flex-direction:column;gap:16px;min-width:0}
+.field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.field>label,.flabel{font-weight:600;font-size:14px}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:420px){.field-row{grid-template-columns:1fr}}
+.field input[type=text]{font:inherit;font-family:var(--f-mono);font-size:16px;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink);width:100%}
+.field input[type=text]:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}
+#d-term{font-family:var(--f-body)}
+.suffix{position:relative}
+.suffix span{position:absolute;right:12px;top:50%;transform:translateY(-50%);color:var(--muted);font-family:var(--f-mono)}
+.field .opts label{flex-direction:column;align-items:flex-start;gap:2px}
+.rules{border-top:1px dashed var(--line);padding-top:12px;display:flex;flex-direction:column;gap:6px;font-size:13px}
+.rules-h{font-family:var(--f-mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.rule{display:grid;grid-template-columns:90px 1fr;gap:10px;color:var(--muted)}
+.rule span:first-child{color:var(--ink);font-weight:500}
+.mono{font-family:var(--f-mono);font-size:12px}
+.meter-demand{background:linear-gradient(90deg,var(--skip) 0 28%,var(--warn) 28% 50%,var(--test) 50% 78%,var(--go) 78% 100%)}
+.flag{background:var(--warn-soft);color:var(--ink);border-radius:8px;padding:10px 12px;font-size:13.5px;border:1px solid var(--warn)}
+.flag strong{color:var(--warn)}
+
+/* Overall */
+.overall{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:12px}
+.ov-term{font-family:var(--f-mono);color:var(--muted);font-size:13px}
+.ov-row{display:flex;flex-wrap:wrap;gap:12px}
+.ov-cell{display:flex;flex-direction:column;gap:2px;padding:10px 14px;border-radius:8px;background:var(--bg);min-width:120px}
+.ov-k{font-size:12px;color:var(--muted);font-family:var(--f-mono);text-transform:uppercase;letter-spacing:.06em}
+.ov-v{font-family:var(--f-mono);font-weight:600;font-size:20px;font-variant-numeric:tabular-nums}
+.ov-verdict{font-family:var(--f-display);font-weight:800;font-size:30px;line-height:1.1}
+.ov-note{color:var(--muted);max-width:62ch}
+
+.note{border-left:3px solid var(--accent);padding:4px 0 4px 14px;color:var(--muted);max-width:70ch}
+.note strong{color:var(--ink)}
+@media (prefers-reduced-motion:reduce){.meter i{transition:none}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Creator Search Insights workflow</div>
+    <h1>Search Gap Saturation Check</h1>
+    <p class="lede">Creator Search Insights shows demand. It doesn't show how much content already exists. Use this flow to check supply by hand in about a minute per term.</p>
+  </header>
+
+  <section aria-labelledby="flow-h">
+    <h2 id="flow-h">The flow</h2>
+    <div class="flow">
+      <div class="step"><div class="n">1</div><div class="body">
+        <span class="where">Creator Search Insights</span>
+        <h3>Find a term with rising demand</h3>
+        <p>Search a brand or niche. Look for a growing % and a "secret / hack / what they don't tell you" angle. Put the popularity and % into the demand checker below. It flags topic clusters (TikTok grouping lots of searches together) so you don't chase fake demand.</p>
+        <div class="chips"><span class="chip">Rising %</span><span class="chip">Content gap tab</span><span class="chip">Insider angle</span></div>
+      </div></div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 14 26"><path d="M7 0V18"/><polygon points="1,17 13,17 7,25"/></svg></div>
+
+      <div class="step"><div class="n">2</div><div class="body">
+        <span class="where">Copy</span>
+        <h3>Copy the exact search phrase</h3>
+        <p>Use the wording people type, not your own version of it.</p>
+      </div></div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 14 26"><path d="M7 0V18"/><polygon points="1,17 13,17 7,25"/></svg></div>
+
+      <div class="step"><div class="n">3</div><div class="body">
+        <span class="where">TikTok search → Videos tab</span>
+        <h3>Look at the top 10–15 videos only</h3>
+        <p>That's what a searcher actually sees. Results are personalised, so treat it as a sample.</p>
+      </div></div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 14 26"><path d="M7 0V18"/><polygon points="1,17 13,17 7,25"/></svg></div>
+
+      <div class="step"><div class="n">4</div><div class="body">
+        <span class="where">Score 4 signals</span>
+        <h3>Engagement, recency, answer quality, competition</h3>
+        <p>Add up the points (table below), or tap through the scorer.</p>
+      </div></div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 14 26"><path d="M7 0V18"/><polygon points="1,17 13,17 7,25"/></svg></div>
+
+      <div class="step"><div class="n">5</div><div class="body">
+        <span class="where">Decide</span>
+        <h3>Go, test, find a better angle, or skip</h3>
+        <p>Then make content that answers the exact search. Re-check the term a few days later: if new videos jump, the window is closing.</p>
+      </div></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="dem-h">
+    <h2 id="dem-h">Check demand</h2>
+    <p class="lede" style="margin-top:-6px">Type what Creator Search Insights shows for the term. Popularity accepts 268K, 4.5M or 268000. Leave the % blank if the row shows no arrow.</p>
+    <form class="scorer" id="demand">
+      <div class="demand-inputs">
+        <div class="field">
+          <label for="d-term">Search term (optional)</label>
+          <input type="text" id="d-term" placeholder="ticketmaster code" value="ticketmaster code" autocomplete="off">
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="d-pop">Search popularity</label>
+            <input type="text" id="d-pop" inputmode="decimal" placeholder="281K" value="281K" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="d-growth">% increase</label>
+            <div class="suffix"><input type="text" id="d-growth" inputmode="decimal" placeholder="1000" value="1000" autocomplete="off"><span>%</span></div>
+          </div>
+        </div>
+        <div class="field">
+          <span class="flabel">Does the term read like a category label?</span>
+          <div class="opts">
+            <input type="radio" name="d-label" id="d-label-no" value="no" checked><label for="d-label-no">No, it's what someone types<span class="p">"ticketmaster code"</span></label>
+            <input type="radio" name="d-label" id="d-label-yes" value="yes"><label for="d-label-yes">Yes, it's a topic description<span class="p">"Walmart store operations and timing"</span></label>
+          </div>
+        </div>
+        <div class="rules">
+          <div class="rules-h">How it scores</div>
+          <div class="rule"><span>Popularity</span><span class="mono">under 20K +0 · 20–50K +1 · 50–150K +2 · 150K+ +3</span></div>
+          <div class="rule"><span>Growth</span><span class="mono">none +0 · under 50% +1 · 50–150% +2 · 150–500% +3 · 500%+ +4</span></div>
+          <div class="rule"><span>Cluster flag</span><span class="mono">1.5M–5M <em>and</em> 180–230% growth, or reads like a category label</span></div>
+        </div>
+      </div>
+      <div class="result" aria-live="polite">
+        <div class="eyebrow">Demand score</div>
+        <div class="score"><span id="d-total">7</span><small> / 7</small></div>
+        <div class="meter meter-demand"><i id="d-pin" style="left:100%"></i></div>
+        <div class="verdict" id="d-verdict">Hot</div>
+        <p class="verdict-note" id="d-note"></p>
+        <div class="flag" id="d-flag" hidden></div>
+      </div>
+    </form>
+  </section>
+
+  <section aria-labelledby="sig-h">
+    <h2 id="sig-h">What to look for</h2>
+    <div class="tablebox">
+      <table>
+        <thead><tr><th>Signal</th><th class="good">Low saturation (good)</th><th class="bad">High saturation (bad)</th><th>Points</th></tr></thead>
+        <tbody>
+          <tr><td>Engagement</td><td>Most videos under 5K–10K likes</td><td>Several videos with 50K–100K+ likes</td><td class="pts">0 · 2 · 3–4</td></tr>
+          <tr><td>Recency</td><td>Top videos are months or years old</td><td>Lots posted in the last 1–7 days</td><td class="pts">0 · 1–2 · 3</td></tr>
+          <tr><td>Answer quality</td><td>Weak, vague, or doesn't fully answer the search</td><td>Clear videos that fully answer it</td><td class="pts">0 · 1–2 · 3</td></tr>
+          <tr><td>Who's posting</td><td>Small or unknown accounts</td><td>Big creators, or a flood of "tutorial pinned" accounts</td><td class="pts">0 · 2 · 3</td></tr>
+          <tr><td>Dominance</td><td>No single video owns the search</td><td>One or two videos dominate the top results</td><td class="pts">tiebreaker</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="band-h">
+    <h2 id="band-h">Saturation score</h2>
+    <div class="bands" id="bands">
+      <div class="band b-go" data-band="0"><span class="range">1–3</span><span class="label">Very low · Strong go</span><p>Old videos, low likes, weak answers.</p></div>
+      <div class="band b-test" data-band="1"><span class="range">4–5</span><span class="label">Low–medium · Test it</span><p>Some decent videos, nothing dominant.</p></div>
+      <div class="band b-warn" data-band="2"><span class="range">6–7</span><span class="label">Medium–high · Better angle only</span><p>Several solid recent videos.</p></div>
+      <div class="band b-skip" data-band="3"><span class="range">8–10</span><span class="label">Saturated · Skip</span><p>Strong recent videos and lots of competition. Go more specific.</p></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="sc-h">
+    <h2 id="sc-h">Score saturation</h2>
+    <form class="scorer" id="scorer">
+      <div>
+        <fieldset class="q"><legend>Engagement of top videos</legend><div class="opts">
+          <input type="radio" name="eng" id="eng0" value="0"><label for="eng0">Most under 5K <span class="p">+0</span></label>
+          <input type="radio" name="eng" id="eng2" value="2"><label for="eng2">Several 10K–50K <span class="p">+2</span></label>
+          <input type="radio" name="eng" id="eng3" value="3"><label for="eng3">Multiple 50K+ <span class="p">+3</span></label>
+          <input type="radio" name="eng" id="eng4" value="4"><label for="eng4">Multiple 100K+ <span class="p">+4</span></label>
+        </div></fieldset>
+        <fieldset class="q"><legend>Recency</legend><div class="opts">
+          <input type="radio" name="rec" id="rec0" value="0"><label for="rec0">Months / years old <span class="p">+0</span></label>
+          <input type="radio" name="rec" id="rec1" value="1"><label for="rec1">Mostly old, some new <span class="p">+1</span></label>
+          <input type="radio" name="rec" id="rec2" value="2"><label for="rec2">Even mix <span class="p">+2</span></label>
+          <input type="radio" name="rec" id="rec3" value="3"><label for="rec3">Lots from last 1–7 days <span class="p">+3</span></label>
+        </div></fieldset>
+        <fieldset class="q"><legend>Quality of answers</legend><div class="opts">
+          <input type="radio" name="qual" id="qual0" value="0"><label for="qual0">Weak / don't answer it <span class="p">+0</span></label>
+          <input type="radio" name="qual" id="qual1" value="1"><label for="qual1">Mid <span class="p">+1</span></label>
+          <input type="radio" name="qual" id="qual2" value="2"><label for="qual2">Decent <span class="p">+2</span></label>
+          <input type="radio" name="qual" id="qual3" value="3"><label for="qual3">Clear, high quality <span class="p">+3</span></label>
+        </div></fieldset>
+        <fieldset class="q"><legend>Competition type</legend><div class="opts">
+          <input type="radio" name="comp" id="comp0" value="0"><label for="comp0">Mostly small accounts <span class="p">+0</span></label>
+          <input type="radio" name="comp" id="comp2" value="2"><label for="comp2">Some big creators / pinned-tutorial accounts <span class="p">+2</span></label>
+          <input type="radio" name="comp" id="comp3" value="3"><label for="comp3">Flood of offer accounts <span class="p">+3</span></label>
+        </div></fieldset>
+      </div>
+      <div class="result" aria-live="polite">
+        <div class="eyebrow">Your score</div>
+        <div class="score"><span id="total">4</span><small> / 10</small></div>
+        <div class="meter"><i id="pin" style="left:40%"></i></div>
+        <div class="verdict" id="verdict">Test it</div>
+        <p class="verdict-note" id="vnote">Example: top videos mostly under 8K likes, half are old, answers are mid, few offer accounts.</p>
+        <button type="reset" class="reset" id="reset">Clear</button>
+      </div>
+    </form>
+  </section>
+
+  <section aria-labelledby="op-h">
+    <h2 id="op-h">Overall call</h2>
+    <div class="overall" id="overall" aria-live="polite">
+      <div class="ov-term" id="ov-term">ticketmaster code</div>
+      <div class="ov-row">
+        <div class="ov-cell"><span class="ov-k">Demand</span><span class="ov-v" id="ov-d">7 / 7</span></div>
+        <div class="ov-cell"><span class="ov-k">Saturation</span><span class="ov-v" id="ov-s">4 / 10</span></div>
+      </div>
+      <div class="ov-verdict" id="ov-verdict">Go</div>
+      <p class="ov-note" id="ov-note"></p>
+    </div>
+  </section>
+
+  <p class="note"><strong>Make content that answers the exact search.</strong> A video that answers what people typed will outlast vague "tutorial pinned" posts. If it links to an offer, label it clearly as an ad or affiliate link.</p>
+</div>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const col={go:'var(--go)',test:'var(--test)',warn:'var(--warn)',skip:'var(--skip)'};
+
+  /* ---------- Demand ---------- */
+  function parsePop(v){
+    v=String(v||'').trim().toUpperCase().replace(/,/g,'');
+    const m=v.match(/^([\d.]+)\s*([KMB]?)/); if(!m) return null;
+    const n=parseFloat(m[1]); if(isNaN(n)) return null;
+    return n*({K:1e3,M:1e6,B:1e9}[m[2]]||1);
+  }
+  function parseGrowth(v){
+    v=String(v||'').replace(/[%+,\s]/g,''); if(v==='') return 0;
+    const n=parseFloat(v); return isNaN(n)?null:n;
+  }
+  function fmt(n){return n>=1e6?(+(n/1e6).toFixed(2))+'M':n>=1e3?(+(n/1e3).toFixed(1))+'K':String(Math.round(n))}
+  let demand={score:null,cluster:false};
+  function updateDemand(){
+    const pop=parsePop($('d-pop').value), g=parseGrowth($('d-growth').value);
+    const label=document.querySelector('input[name="d-label"]:checked')?.value==='yes';
+    const flag=$('d-flag');
+    if(pop===null||g===null){
+      $('d-total').textContent='–'; $('d-pin').style.left='0%';
+      $('d-verdict').textContent='Enter the popularity'; $('d-verdict').style.color='';
+      $('d-note').textContent='Use the number from the Search popularity column.';
+      flag.hidden=true; demand={score:null,cluster:false}; updateOverall(); return;
+    }
+    const pp=pop<2e4?0:pop<5e4?1:pop<1.5e5?2:3;
+    const gp=g<=0?0:g<50?1:g<150?2:g<500?3:4;
+    const score=pp+gp;
+    const numericCluster=pop>=1.5e6&&pop<=5e6&&g>=180&&g<=230;
+    const cluster=numericCluster||label;
+    let v,c,n;
+    if(score>=6){v='Hot';c=col.go;n='Strong volume and fast growth.'}
+    else if(score>=4){v='Good';c=col.test;n='Real demand. Worth checking saturation.'}
+    else if(score>=2){v='Weak';c=col.warn;n='Only worth it if saturation is very low.'}
+    else {v='Skip';c=col.skip;n='Not enough people searching.'}
+    if(g>=500&&pop<5e4) n+=' Small but spiking: it may be a brand-new trend, so check it again in a day or two.';
+    if(g===0) n+=' No growth arrow: steady demand, not a rising signal.';
+    if(cluster){
+      v='Likely a topic cluster'; c=col.warn;
+      n='Don’t trust this number on its own.';
+      flag.innerHTML='<strong>Why it’s flagged:</strong> '+(numericCluster?fmt(pop)+' at '+Math.round(g)+'% matches the pattern TikTok shows for grouped topics (every brand has a dozen rows like this). ':'')+(label?'It reads like a category description, not something a person types. ':'')+'Open the row or search the brand plus a specific word, and score the real phrase people type instead.';
+      flag.hidden=false;
+    } else flag.hidden=true;
+    $('d-total').textContent=score;
+    $('d-pin').style.left=(score/7*100)+'%';
+    $('d-verdict').textContent=v; $('d-verdict').style.color=c;
+    $('d-note').textContent=n;
+    demand={score,cluster};
+    updateOverall();
+  }
+  ['d-pop','d-growth','d-term'].forEach(id=>$(id).addEventListener('input',updateDemand));
+  document.querySelectorAll('input[name="d-label"]').forEach(el=>el.addEventListener('change',updateDemand));
+  $('demand').addEventListener('submit',e=>e.preventDefault());
+
+  /* ---------- Saturation ---------- */
+  const form=$('scorer'), bands=[...document.querySelectorAll('.band')];
+  const SV=[
+    {t:'Strong go',n:'Top results are weak. Move fast and answer the exact search.',c:col.go},
+    {t:'Test it',n:'Room to win. Make one or two videos and watch the response.',c:col.test},
+    {t:'Better angle only',n:'Only go in if you can clearly beat what’s there, or narrow the phrase.',c:col.warn},
+    {t:'Skip',n:'Saturated. Look for a more specific version of the search.',c:col.skip}
+  ];
+  const band=s=>s<=3?0:s<=5?1:s<=7?2:3;
+  let sat=null;
+  function updateSat(isExample){
+    let s=0,count=0;
+    ['eng','rec','qual','comp'].forEach(k=>{const el=form.querySelector('input[name="'+k+'"]:checked');if(el){s+=+el.value;count++}});
+    if(!count){
+      sat=null; $('total').textContent='–'; $('pin').style.left='0%';
+      $('verdict').textContent='Pick an option in each row'; $('verdict').style.color='';
+      $('vnote').textContent='Your score updates as you tap.';
+      bands.forEach(el=>el.classList.remove('on')); updateOverall(); return;
+    }
+    s=Math.min(Math.max(s,1),10); sat=s; const b=band(s);
+    $('total').textContent=s; $('pin').style.left=(s*10)+'%';
+    $('verdict').textContent=SV[b].t; $('verdict').style.color=SV[b].c;
+    if(!isExample) $('vnote').textContent=SV[b].n+(count<4?' ('+count+' of 4 rows answered)':'');
+    bands.forEach((el,i)=>el.classList.toggle('on',i===b));
+    updateOverall();
+  }
+  const preset={eng:'0',rec:'2',qual:'2',comp:'0'};
+  Object.entries(preset).forEach(([k,v])=>{const el=form.querySelector('input[name="'+k+'"][value="'+v+'"]');if(el)el.checked=true});
+  form.addEventListener('change',()=>updateSat(false));
+  form.addEventListener('reset',()=>setTimeout(()=>updateSat(false),0));
+  form.addEventListener('submit',e=>e.preventDefault());
+
+  /* ---------- Overall ---------- */
+  function updateOverall(){
+    const term=$('d-term').value.trim();
+    $('ov-term').textContent=term||'This term';
+    $('ov-d').textContent=demand.score===null?'–':demand.score+' / 7';
+    $('ov-s').textContent=sat===null?'–':sat+' / 10';
+    let v,c,n;
+    if(demand.score===null||sat===null){v='Fill in both checks';c='';n='Enter the demand numbers and score saturation to get a call.'}
+    else if(demand.cluster){v='Find the real phrase first';c=col.warn;n='The demand number is probably a grouped topic. Score a specific search people actually type.'}
+    else if(demand.score<2){v='Skip';c=col.skip;n='Too few searches to be worth it, however empty the results are.'}
+    else if(sat>=8){v='Skip';c=col.skip;n='Already saturated. Try a narrower version of the phrase.'}
+    else if(demand.score>=4&&sat<=3){v='Go now';c=col.go;n='Real demand and weak supply. This is the signal you’re looking for.'}
+    else if(demand.score>=4&&sat<=5){v='Go';c=col.go;n='Good demand with room to win. Test a couple of videos.'}
+    else if(demand.score>=4){v='Only with a better angle';c=col.warn;n='Demand is there but so is competition. Beat the top videos or narrow the phrase.'}
+    else if(sat<=3){v='Small test';c=col.test;n='Low demand but wide open. Cheap to try, don’t expect much volume.'}
+    else {v='Probably skip';c=col.skip;n='Weak demand plus real competition.'}
+    $('ov-verdict').textContent=v; $('ov-verdict').style.color=c; $('ov-note').textContent=n;
+  }
+
+  updateDemand();
+  updateSat(true);
+})();
+</script>
+
+</body>
+</html>
